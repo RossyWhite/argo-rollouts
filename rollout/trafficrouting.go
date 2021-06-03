@@ -66,8 +66,7 @@ func (c *Controller) NewTrafficRoutingReconciler(roCtx *rolloutContext) (Traffic
 		})
 	}
 	if rollout.Spec.Strategy.Canary.TrafficRouting.Ambassador != nil {
-		ac := ambassador.NewDynamicClient(c.dynamicclientset, rollout.GetNamespace())
-		return ambassador.NewReconciler(rollout, ac, c.recorder), nil
+		return ambassador.NewReconciler(rollout, ambassador.NewDynamicClient(c.dynamicclientset), c.recorder), nil
 	}
 	return nil, nil
 }

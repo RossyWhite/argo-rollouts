@@ -49,28 +49,19 @@ func GetAPIVersion() string {
 // Reconciler implements a TrafficRoutingReconciler for Ambassador.
 type Reconciler struct {
 	Rollout  *v1alpha1.Rollout
-	Client   ClientInterface
+	Client   dynamic.NamespaceableResourceInterface
 	Recorder record.EventRecorder
 	Log      *logrus.Entry
 }
 
-// ClientInterface defines a subset of k8s client operations having only the required
-// ones.
-type ClientInterface interface {
-	Get(ctx context.Context, name string, options metav1.GetOptions, subresources ...string) (*unstructured.Unstructured, error)
-	Create(ctx context.Context, obj *unstructured.Unstructured, options metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error)
-	Update(ctx context.Context, obj *unstructured.Unstructured, options metav1.UpdateOptions, subresources ...string) (*unstructured.Unstructured, error)
-	Delete(ctx context.Context, name string, options metav1.DeleteOptions, subresources ...string) error
-}
-
 // NewDynamicClient will initialize a real kubernetes dynamic client to interact
 // with Ambassador CRDs
-func NewDynamicClient(di dynamic.Interface, namespace string) dynamic.ResourceInterface {
-	return di.Resource(GetMappingGVR()).Namespace(namespace)
+func NewDynamicClient(di dynamic.Interface) dynamic.NamespaceableResourceInterface {
+	return di.Resource(GetMappingGVR())
 }
 
 // NewReconciler will build and return an ambassador Reconciler
-func NewReconciler(r *v1alpha1.Rollout, c ClientInterface, rec record.EventRecorder) *Reconciler {
+func NewReconciler(r *v1alpha1.Rollout, c dynamic.NamespaceableResourceInterface, rec record.EventRecorder) *Reconciler {
 	return &Reconciler{
 		Rollout:  r,
 		Client:   c,
@@ -134,18 +125,39 @@ func formatErrors(errs []error) error {
 	}
 	return errors.New(errMsg.String())
 }
+func GetMappingNamespaceName(vsv string) (string, string) {
+	namespace := ""
+	name := ""
+
+	fields := strings.Split(vsv, ".")
+	if len(fields) >= 2 {
+		name = fields[0]
+		namespace = fields[1]
+	} else if len(fields) == 1 {
+		name = fields[0]
+	}
+
+	return namespace, name
+}
 
 // handleCanaryMapping has the logic to create, update or delete canary mappings
 func (r *Reconciler) handleCanaryMapping(ctx context.Context, baseMappingName string, desiredWeight int32) error {
-	canaryMappingName := buildCanaryMappingName(baseMappingName)
-	canaryMapping, err := r.Client.Get(ctx, canaryMappingName, metav1.GetOptions{})
+	namespace, name := GetMappingNamespaceName(baseMappingName)
+	if namespace == "" {
+		namespace = r.Rollout.GetNamespace()
+	}
+
+	client := r.Client.Namespace(namespace)
+
+	canaryMappingName := buildCanaryMappingName(name)
+	canaryMapping, err := client.Get(ctx, canaryMappingName, metav1.GetOptions{})
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
 			if desiredWeight == 0 {
 				return nil
 			}
 			r.Log.Infof("creating canary mapping based on %q", baseMappingName)
-			return r.createCanaryMapping(ctx, baseMappingName, desiredWeight, r.Client)
+			return r.createCanaryMapping(ctx, baseMappingName, desiredWeight, client)
 		}
 		return err
 	}
@@ -159,7 +171,7 @@ func (r *Reconciler) handleCanaryMapping(ctx context.Context, baseMappingName st
 			// updating the weight to zero to prevent traffic to reach the older
 			// version at the end of the rollout
 			r.Log.Infof("deleting canary mapping %q", canaryMapping.GetName())
-			err := r.deleteCanaryMapping(ctx, canaryMapping, desiredWeight, r.Client)
+			err := r.deleteCanaryMapping(ctx, canaryMapping, desiredWeight, client)
 			if err != nil {
 				r.Log.Errorf("error deleting canary mapping: %s", err)
 			}
@@ -167,13 +179,13 @@ func (r *Reconciler) handleCanaryMapping(ctx context.Context, baseMappingName st
 	}
 
 	r.Log.Infof("updating canary mapping %q weight to %d", canaryMapping.GetName(), desiredWeight)
-	return r.updateCanaryMapping(ctx, canaryMapping, desiredWeight, r.Client)
+	return r.updateCanaryMapping(ctx, canaryMapping, desiredWeight, client)
 }
 
 func (r *Reconciler) updateCanaryMapping(ctx context.Context,
 	canaryMapping *unstructured.Unstructured,
 	desiredWeight int32,
-	client ClientInterface) error {
+	client dynamic.ResourceInterface) error {
 
 	setMappingWeight(canaryMapping, desiredWeight)
 	_, err := client.Update(ctx, canaryMapping, metav1.UpdateOptions{})
@@ -187,7 +199,7 @@ func (r *Reconciler) updateCanaryMapping(ctx context.Context,
 func (r *Reconciler) deleteCanaryMapping(ctx context.Context,
 	canaryMapping *unstructured.Unstructured,
 	desiredWeight int32,
-	client ClientInterface) error {
+	client dynamic.ResourceInterface) error {
 
 	err := client.Delete(ctx, canaryMapping.GetName(), metav1.DeleteOptions{})
 	if err != nil {
@@ -201,7 +213,7 @@ func (r *Reconciler) deleteCanaryMapping(ctx context.Context,
 func (r *Reconciler) createCanaryMapping(ctx context.Context,
 	baseMappingName string,
 	desiredWeight int32,
-	client ClientInterface) error {
+	client dynamic.ResourceInterface) error {
 
 	baseMapping, err := client.Get(ctx, baseMappingName, metav1.GetOptions{})
 	if err != nil {
